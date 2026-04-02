@@ -19,6 +19,7 @@ import concurrent.futures
 MAX_TIME_TO_WAIT_FOR_LOGIN = 3
 YOUTUBE_FETCH_INTERVAL = 1
 
+
 class Twitch:
     re_prog = None
     sock = None
@@ -164,7 +165,7 @@ class YouTube:
     next_fetch_time = 0
 
     re_initial_data = re.compile(r'var ytInitialData\s*=\s*({.+?});\s*</script>', re.DOTALL)
-    re_config = re.compile('(?:ytcfg\\s*.set)\\(({.+?})\\)\\s*;')
+    re_config = re.compile(r'(?:ytcfg\.set)\s*\(({.+?})\)\s*;', re.DOTALL)
 
     def get_continuation_token(self, data):
         cont = data['continuationContents']['liveChatContinuation']['continuations'][0]
@@ -175,7 +176,7 @@ class YouTube:
 
     def reconnect(self, delay):
         if self.fetch_job and self.fetch_job.running():
-            if not fetch_job.cancel():
+            if not self.fetch_job.cancel():
                 print("Waiting for fetch job to finish...")
                 self.fetch_job.result()
         print(f"Retrying in {delay}...")
@@ -197,7 +198,7 @@ class YouTube:
         # Create http client session
         self.session = requests.Session()
         # Spoof user agent so yt thinks we're an upstanding browser
-        self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36'
+        self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
         # Add consent cookie to bypass google's consent page
         requests.utils.add_dict_to_cookiejar(self.session.cookies, {'CONSENT': 'YES+'})
 
@@ -223,7 +224,24 @@ class YouTube:
         # Find initial data in livestream page
         matches = list(self.re_initial_data.finditer(livestream_page))
         if len(matches) == 0:
-            print("Couldn't find initial data in livestream page")
+            print("Couldn't find initial data in livestream page.")
+            print("[DEBUG] Infos de diagnostic :")
+            print(f"  - URL chargée : {live_url}")
+            print(f"  - Taille de la page reçue : {len(livestream_page)} caractères")
+            print(f"  - 'ytInitialData' présent dans la page : {'ytInitialData' in livestream_page}")
+            print(f"  - 'var ytInitialData' présent dans la page : {'var ytInitialData' in livestream_page}")
+            alt_patterns = [
+                r'ytInitialData\s*=\s*{',
+                r'window\["ytInitialData"\]',
+                r"window\['ytInitialData'\]",
+            ]
+            for pat in alt_patterns:
+                found = bool(re.search(pat, livestream_page))
+                print(f"  - Pattern alternatif '{pat}' trouvé : {found}")
+            print(f"  - Début de la page reçue (500 premiers caractères) :")
+            print(f"    {livestream_page[:500]}")
+            print("[DEBUG] Si 'ytInitialData' est absent, YouTube bloque probablement la requête")
+            print("        (bot detection, consent wall, ou live non actif).")
             time.sleep(5)
             exit(1)
         initial_data = json.loads(matches[0].group(1))
@@ -234,6 +252,12 @@ class YouTube:
             iframe_continuation = initial_data['contents']['twoColumnWatchNextResults']['conversationBar']['liveChatRenderer']['header']['liveChatHeaderRenderer']['viewSelector']['sortFilterSubMenuRenderer']['subMenuItems'][1]['continuation']['reloadContinuationData']['continuation']
         except Exception as e:
             print(f"Couldn't find the livestream chat. Is the channel not live? url: {live_url}")
+            print(f"[DEBUG] Exception : {e}")
+            print("[DEBUG] Clés présentes dans initial_data['contents'] :")
+            try:
+                print(f"  {list(initial_data.get('contents', {}).keys())}")
+            except Exception:
+                pass
             time.sleep(5)
             exit(1)
 
@@ -248,7 +272,13 @@ class YouTube:
         # Find initial data in live chat page
         matches = list(self.re_initial_data.finditer(live_chat_page))
         if len(matches) == 0:
-            print("Couldn't find initial data in live chat page")
+            print("Couldn't find initial data in live chat page.")
+            print("[DEBUG] Infos de diagnostic :")
+            print(f"  - Taille de la page reçue : {len(live_chat_page)} caractères")
+            print(f"  - 'ytInitialData' présent dans la page : {'ytInitialData' in live_chat_page}")
+            print(f"  - 'var ytInitialData' présent dans la page : {'var ytInitialData' in live_chat_page}")
+            print(f"  - Début de la page reçue (500 premiers caractères) :")
+            print(f"    {live_chat_page[:500]}")
             time.sleep(5)
             exit(1)
         initial_data = json.loads(matches[0].group(1))
@@ -256,7 +286,11 @@ class YouTube:
         # Find config data
         matches = list(self.re_config.finditer(live_chat_page))
         if len(matches) == 0:
-            print("Couldn't find config data in live chat page")
+            print("Couldn't find config data in live chat page.")
+            print("[DEBUG] Infos de diagnostic :")
+            print(f"  - 'ytcfg.set' présent dans la page : {'ytcfg.set' in live_chat_page}")
+            print(f"  - Début de la page reçue (500 premiers caractères) :")
+            print(f"    {live_chat_page[:500]}")
             time.sleep(5)
             exit(1)
         self.config = json.loads(matches[0].group(1))
