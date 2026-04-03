@@ -164,8 +164,8 @@ class YouTube:
     fetch_job = None
     next_fetch_time = 0
 
+    # Regex pour ytInitialData sur la page du stream (syntaxe "var ytInitialData = {...}")
     re_initial_data = re.compile(r'var ytInitialData\s*=\s*({.+?});\s*</script>', re.DOTALL)
-    re_config = re.compile(r'(?:ytcfg\.set)\s*\(({.+?})\)\s*;', re.DOTALL)
 
     def get_continuation_token(self, data):
         cont = data['continuationContents']['liveChatContinuation']['continuations'][0]
@@ -199,8 +199,12 @@ class YouTube:
         self.session = requests.Session()
         # Spoof user agent so yt thinks we're an upstanding browser
         self.session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-        # Add consent cookie to bypass google's consent page
-        requests.utils.add_dict_to_cookiejar(self.session.cookies, {'CONSENT': 'YES+'})
+        self.session.headers['Accept-Language'] = 'en-US,en;q=0.9'
+        # Bypass Google consent wall - CONSENT: 'YES+' is outdated, use SOCS cookie instead
+        requests.utils.add_dict_to_cookiejar(self.session.cookies, {
+            'SOCS': 'CAESEwgDEgk1NzU3NjQyNTMaAmVuIAEaBgiA5Y-2Bg',
+            'CONSENT': 'YES+cb.20210720-07-p0.en+FX+410',
+        })
 
         # Connect using stream_url if provided, otherwise use the channel_id
         if stream_url is not None:
@@ -246,60 +250,60 @@ class YouTube:
             exit(1)
         initial_data = json.loads(matches[0].group(1))
 
-        # Get continuation token for live chat iframe
-        iframe_continuation = None
-        try:
-            iframe_continuation = initial_data['contents']['twoColumnWatchNextResults']['conversationBar']['liveChatRenderer']['header']['liveChatHeaderRenderer']['viewSelector']['sortFilterSubMenuRenderer']['subMenuItems'][1]['continuation']['reloadContinuationData']['continuation']
-        except Exception as e:
-            print(f"Couldn't find the livestream chat. Is the channel not live? url: {live_url}")
-            print(f"[DEBUG] Exception : {e}")
-            print("[DEBUG] Clés présentes dans initial_data['contents'] :")
+        # Get the long continuation token directly from the page source.
+        # The short tokens in subMenuItems are iframe tokens — unusable with get_live_chat.
+        # The real token is a long (100+ chars) continuation token embedded elsewhere in the page.
+        long_tokens = re.findall(r'"continuation"\s*:\s*"([A-Za-z0-9_\-]{100,})"', livestream_page)
+        if long_tokens:
+            chat_continuation = long_tokens[0]
+            print(f"Found long continuation token.")
+        else:
+            # Fallback to subMenuItems token (used to load chat page and extract ytcfg)
             try:
-                print(f"  {list(initial_data.get('contents', {}).keys())}")
-            except Exception:
-                pass
-            time.sleep(5)
-            exit(1)
+                chat_continuation = initial_data['contents']['twoColumnWatchNextResults']['conversationBar']['liveChatRenderer']['header']['liveChatHeaderRenderer']['viewSelector']['sortFilterSubMenuRenderer']['subMenuItems'][1]['continuation']['reloadContinuationData']['continuation']
+                print(f"Long token not found, falling back to subMenuItems token.")
+            except Exception as e:
+                print(f"Couldn't find the livestream chat. Is the channel not live? url: {live_url}")
+                print(f"[DEBUG] Exception : {e}")
+                try:
+                    print(f"[DEBUG] Clés présentes dans initial_data['contents'] : {list(initial_data.get('contents', {}).keys())}")
+                except Exception:
+                    pass
+                time.sleep(5)
+                exit(1)
 
-        # Fetch live chat page
-        res = self.session.get(f'https://youtube.com/live_chat?continuation={iframe_continuation}')
+        # Fetch live chat page to extract ytcfg config (INNERTUBE_API_KEY + INNERTUBE_CONTEXT)
+        # Note: ytInitialData is loaded dynamically on this page — we only need ytcfg here.
+        res = self.session.get(f'https://youtube.com/live_chat?continuation={chat_continuation}')
         if not res.ok:
             print(f"Couldn't load live chat page ({res.status_code} {res.reason})")
             time.sleep(5)
             exit(1)
         live_chat_page = res.text
 
-        # Find initial data in live chat page
-        matches = list(self.re_initial_data.finditer(live_chat_page))
-        if len(matches) == 0:
-            print("Couldn't find initial data in live chat page.")
-            print("[DEBUG] Infos de diagnostic :")
-            print(f"  - Taille de la page reçue : {len(live_chat_page)} caractères")
-            print(f"  - 'ytInitialData' présent dans la page : {'ytInitialData' in live_chat_page}")
-            print(f"  - 'var ytInitialData' présent dans la page : {'var ytInitialData' in live_chat_page}")
-            print(f"  - Début de la page reçue (500 premiers caractères) :")
-            print(f"    {live_chat_page[:500]}")
-            time.sleep(5)
-            exit(1)
-        initial_data = json.loads(matches[0].group(1))
+        # Merge all ytcfg.set({...}) blocks — YouTube splits config across multiple calls
+        config = {}
+        for match in re.finditer(r'ytcfg\.set\s*\((\{.+?\})\)\s*;', live_chat_page, re.DOTALL):
+            try:
+                config.update(json.loads(match.group(1)))
+            except Exception:
+                pass
 
-        # Find config data
-        matches = list(self.re_config.finditer(live_chat_page))
-        if len(matches) == 0:
+        if 'INNERTUBE_API_KEY' not in config or 'INNERTUBE_CONTEXT' not in config:
             print("Couldn't find config data in live chat page.")
             print("[DEBUG] Infos de diagnostic :")
             print(f"  - 'ytcfg.set' présent dans la page : {'ytcfg.set' in live_chat_page}")
+            print(f"  - Clés trouvées dans ytcfg : {list(config.keys())}")
             print(f"  - Début de la page reçue (500 premiers caractères) :")
             print(f"    {live_chat_page[:500]}")
             time.sleep(5)
             exit(1)
-        self.config = json.loads(matches[0].group(1))
+        self.config = config
 
-        # Create payload object for making live chat requests
-        token = self.get_continuation_token(initial_data)
+        # Build initial payload with the long continuation token
         self.payload = {
             "context": self.config['INNERTUBE_CONTEXT'],
-            "continuation": token,
+            "continuation": chat_continuation,
             "webClientInfo": {
                 "isDocumentHidden": False
             },
@@ -308,7 +312,7 @@ class YouTube:
 
     def fetch_messages(self):
         payload_bytes = bytes(json.dumps(self.payload), "utf8")
-        res = self.session.post(f"https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key={self.config['INNERTUBE_API_KEY']}&prettyPrint=false", payload_bytes)
+        res = self.session.post("https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?prettyPrint=false", payload_bytes)
         if not res.ok:
             print(f"Failed to fetch messages. {res.status_code} {res.reason}")
             print("Body:", res.text)
