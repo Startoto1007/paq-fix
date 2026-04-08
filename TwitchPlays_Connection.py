@@ -327,8 +327,11 @@ class YouTube:
         if 'actions' in cont:
             for action in cont['actions']:
                 if 'addChatItemAction' in action:
-                    item = action['addChatItemAction']['item']['liveChatTextMessageRenderer']
-                    messages.append({'author': item['authorName']['simpleText'], 'content': item['message']['runs']})
+                    item = action['addChatItemAction']['item']
+                    if 'liveChatTextMessageRenderer' not in item:
+                        continue  # Ignore superchats, memberships, pinned messages, etc.
+                    msg_renderer = item['liveChatTextMessageRenderer']
+                    messages.append({'author': msg_renderer['authorName']['simpleText'], 'content': msg_renderer['message']['runs']})
         return messages
 
     def twitch_receive_messages(self):
